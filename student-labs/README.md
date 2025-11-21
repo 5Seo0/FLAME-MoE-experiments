@@ -1,144 +1,198 @@
-# 🚀 Quick Start: FLAME-MoE Linguistic Analysis
+# Test 1: Analyzing Mixture-of-Experts (MoE) Routing
 
-**Goal:** Analyze how a Mixture-of-Experts (MoE) model "routes" different languages.
-**Task:** You will use a small, efficient model (FLAME-MoE-115M) to see if it sends Korean, Japanese, or English tokens to different experts.
-**Hardware:** Adapted for the MLTGPU-2 Student Server (Single GPU).
+**Objective:** In this lab, you will run a state-of-the-art MoE model (`OLMoE-1B-7B`) and "spy" on its internal router. Your goal is to visualize how the model assigns different experts to different languages (English vs. Korean/Japanese).
+
+**Hardware:** This lab is optimized for the **MLTGPU-2** student server (A30 GPU slices).
 
 ---
 
-## 1. Environment Setup
+## Step 1: Environment Setup
 
-Open a terminal on the server and run these commands one by one to create your workspace.
+Open a terminal on the server and run the following commands to create your research environment.
+
+### 1. Load System Modules
+
+We need the base Conda module provided by the university server.
 
 ```bash
-# 1. Load the system Conda module
 module load miniconda
-
-# 2. Create a fresh environment named 'moe_lab'
-conda create -n moe_lab python=3.10 -y
-
-# 3. Activate the environment
-source activate moe_lab
-
-# 4. Install required AI and Plotting libraries
-# (We use cu121 for the A30 GPUs on the student server)
-pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
-pip install transformers accelerate matplotlib seaborn jupyterlab
 ```
 
-## 2. Start Your Notebook
+### 2. Create the Conda Environment
 
-1. In your terminal (inside the moe_lab environment), start Jupyter:
+We will create an isolated environment named moe_lab with Python 3.10.
 
-    ```bash
-    jupyter lab --no-browser --port=8888
-    ```
+```bash
+conda create -n moe_lab python=3.10 -y
+source activate moe_lab
+```
 
-2. Follow the SSH tunneling instructions provided by the course to open the link in your browser.
+### 3. Install Required Libraries
 
-3. Create a new Python 3 (ipykernel) notebook.
+```bash
+# Install PyTorch (CUDA 12.1 compatible for A30 GPUs)
+pip install torch torchvision torchaudio --index-url [https://download.pytorch.org/whl/cu121](https://download.pytorch.org/whl/cu121)
 
-## 3. The "Spy" Code (Copy into Cell 1)
+# Install Hugging Face and Analysis Tools
+# We force an upgrade to ensure OLMoE model support
+pip install -U transformers accelerate bitsandbytes numpy matplotlib seaborn jupyterlab ipywidgets
+```
 
-This code loads the model and attaches a "hook" to the router. This allows us to see which expert the model chooses for every single token.
+## Step 2: Launch Jupyter
 
-    ```python
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    import matplotlib.pyplot as plt
-    import seaborn as sns
+**Start the Lab:** Run this command inside your moe_lab environment:
 
-    # --- CONFIGURATION ---
-    # We use the 115M version. It is small enough to fit on one MIG slice (12GB).
-    MODEL_ID = "CMU-FLAME/FLAME-MoE-115M-459M"
+```bash
+jupyter lab --no-browser --port=8888
+```
 
-    print(f"Loading {MODEL_ID}...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True)
+**Connect:** Follow the standard course instructions to SSH tunnel the port to your laptop (e.g., ssh -L 8888:localhost:8888 student@server...).
 
-    # trust_remote_code=True is REQUIRED because FLAME uses custom architecture code
-    model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID, 
-        torch_dtype=torch.float16, 
-        device_map="auto", 
-        trust_remote_code=True
-    )
-    print("Model loaded successfully!")
+**Open:** Open the link provided in the terminal (usually <http://localhost:8888/lab>...) in your browser.
 
-    # --- ROUTER SPY SETUP ---
-    # This dictionary will store the router choices for the most recent pass
-    router_logs = {}
+## Step 3: The Analysis Code
 
-    def get_router_hook(layer_name):
-        """Creates a hook that saves the router's choices (logits) to our log."""
-        def hook(module, inputs, outputs):
-            # FLAME outputs are usually a tuple. The router logits are often the 2nd item.
-            # Shape is typically [batch_size, seq_len, num_experts]
-            if isinstance(outputs, tuple) and len(outputs) > 1:
-                # We detach() and move to CPU immediately to save GPU memory
-                router_logs[layer_name] = outputs[1].detach().cpu()
-        return hook
+Create a new notebook (e.g., 01_Router_Analysis.ipynb) and paste the following code blocks.
 
-    # Attach our spy hook to every MoE layer in the model
-    print("Attaching hooks...")
-    for name, module in model.named_modules():
-        # We look for modules with 'moe' and 'gate' in their name
-        if "moe" in name and "gate" in name:
-            print(f" -> Hooked: {name}")
-            module.register_forward_hook(get_router_hook(name))
-
-    print("Ready to analyze!")
-    ```
-
-## 4. Run an Experiment (Copy into Cell 2)
-
-Run this cell to test if different languages trigger different experts.
+Block 1: Load the Model (Quantized)
+We use 4-bit quantization to fit the 7B parameter model into your 12GB GPU slice.
 
 ```python
-    # 1. Define a multilingual test sentence
-    # Feel free to change this to your target languages!
-    text = "The quick brown fox. 안녕하세요. こんにちは." 
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-    # 2. Tokenize and Run Inference
-    inputs = tokenizer(text, return_tensors="pt").to(model.device)
+# Define the model (AllenAI OLMoE-1B-7B)
+MODEL_ID = "AllenAI/OLMoE-1B-7B-0924"
 
-    # Clear old logs before running
-    router_logs = {} 
+# Configure 4-bit quantization to save memory
+quant_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_compute_dtype=torch.float16,
+    bnb_4bit_quant_type="nf4"
+)
 
-    with torch.no_grad():
-        outputs = model(**inputs)
-
-    # 3. Analyze the Results
-    # Let's look at a middle layer (e.g., layer 5 or 6)
-    layer_to_analyze = list(router_logs.keys())[5] 
-    logits = router_logs[layer_to_analyze].float() # Shape: [1, seq_len, 64]
-
-    # Find the "Top-1" expert for each token (the one with the highest score)
-    top_experts = torch.argmax(logits, dim=-1).squeeze() 
-    tokens = tokenizer.convert_ids_to_tokens(inputs.input_ids[0])
-
-    # 4. Print Table
-    print(f"\n--- Routing Pattern for {layer_to_analyze} ---")
-    print(f"{'TOKEN':<15} | {'CHOSEN EXPERT'}")
-    print("-" * 35)
-
-    for t, expert in zip(tokens, top_experts):
-        # Decode special characters for cleaner printing
-        readable_token = tokenizer.convert_tokens_to_string([t]).strip()
-        print(f"{readable_token:<15} | Expert {expert.item()}")
-
-    # 5. Visualization (Heatmap)
-    plt.figure(figsize=(12, 5))
-    # We only plot the first 20 tokens to keep it readable
-    sns.heatmap(logits[0, :20, :].numpy(), cmap="viridis", cbar_kws={'label': 'Router Activation Score'})
-    plt.title(f"Expert Activation: {layer_to_analyze}")
-    plt.xlabel("Expert ID (0-63)")
-    plt.ylabel("Token Position")
-    plt.tight_layout()
-    plt.show()
+print(f"Loading {MODEL_ID}...")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    quantization_config=quant_config,
+    device_map="auto"
+)
+print(f"Success! Model loaded on {model.device}")
 ```
 
-### Student Tips
+**Block 2: Attach the "Router Spy"**
+This code attaches a hook to the model to capture the routing decisions during inference.
 
-- `trust_remote_code=True`: You will see a warning about this. It is normal. FLAME is a research model and requires custom code to run the "Expert" routing logic.
-- **Memory Management**: If you run out of GPU memory (CUDA Out of Memory), try restarting the notebook kernel. The router_logs can get big if you feed it huge books, so analyze one batch of sentences at a time.
-- **Your Thesis Task**: Your goal is to replace the single text string in Step 4 with a loop that processes thousands of English vs. Korean sentences. You will then count: "Did Expert 5 activate 90% of the time for Korean, but only 10% for English?"
+```python
+# Dictionary to store the router outputs
+router_logs = {}
+
+def get_router_hook(layer_name):
+    def hook(module, inputs, outputs):
+        # Robustly handle tuple vs tensor outputs
+        # OLMoE routers often return a tuple where [1] is the logits
+        if isinstance(outputs, tuple):
+            val = outputs[1] 
+        else:
+            val = outputs
+        
+        # Only capture if it matches the expert count (64 for OLMoE)
+        if isinstance(val, torch.Tensor) and val.shape[-1] == 64:
+            # Detach and move to CPU to save GPU memory
+            router_logs[layer_name] = val.detach().float().cpu()
+    return hook
+
+# Clear old hooks (if re-running)
+for name, module in model.named_modules():
+    if hasattr(module, "_forward_hooks"):
+        module._forward_hooks.clear()
+
+# Attach new hooks to the router layers
+print("Attaching spy hooks...")
+hook_count = 0
+for name, module in model.named_modules():
+    # We target the specific gate layer in the OLMoE architecture
+    if name.endswith("mlp.gate"): 
+        module.register_forward_hook(get_router_hook(name))
+        hook_count += 1
+
+print(f"Attached {hook_count} hooks (Expect 32 for this model).")
+```
+
+**Block 3: Run & Visualize**
+Run this block to see the expert specialization in action.
+
+```python
+# Run a sample inference
+input_text = "Hello, how are you?"
+inputs = tokenizer(input_text, return_tensors="pt").to(model.device)
+outputs = model.generate(**inputs, max_new_tokens=10)
+
+# Visualize the routing
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Plot the routing distribution for each hook
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# 1. Define a Multilingual Test Sentence
+text = "The quick brown fox jumps. 안녕하세요. こんにちは."
+inputs = tokenizer(text, return_tensors="pt").to(model.device)
+
+# 2. Run Inference
+router_logs = {} # Clear previous logs
+with torch.no_grad():
+    outputs = model(**inputs)
+
+# 3. Analyze a Deep Layer (Layer 14)
+# Deep layers often show the strongest specialization
+target_layer = "model.layers.14.mlp.gate"
+
+if target_layer in router_logs:
+    logits = router_logs[target_layer].numpy()
+    
+    # Handle potential shape differences (Batch vs No-Batch)
+    if logits.ndim == 3:
+        data = logits[0] # [Seq, Experts]
+    else:
+        data = logits
+
+    # Get the text labels
+    tokens = tokenizer.convert_ids_to_tokens(inputs.input_ids[0])
+    token_labels = [tokenizer.convert_tokens_to_string([t]).strip() for t in tokens]
+    
+    # --- Visualization ---
+    plt.figure(figsize=(14, 6))
+    sns.heatmap(
+        data, 
+        cmap="viridis", 
+        yticklabels=token_labels,
+        cbar_kws={'label': 'Router Score'}
+    )
+    plt.title(f"Linguistic Specialization in {target_layer}")
+    plt.xlabel("Expert ID (0-63)")
+    plt.ylabel("Token Sequence")
+    plt.yticks(rotation=0)
+    plt.tight_layout()
+    plt.show()
+    
+    # Print Top Experts
+    print(f"{'TOKEN':<15} | {'TOP EXPERT'}")
+    print("-" * 30)
+    for t, expert_id in zip(token_labels, np.argmax(data, axis=-1)):
+        print(f"{t:<15} | {expert_id}")
+
+else:
+    print(f"Layer {target_layer} not found. Captured: {list(router_logs.keys())[:3]}...")
+```
+
+**Next Steps for examination:**
+
+**Scale Up:** Wrap Block 3 in a loop that feeds 1,000 sentences from your dataset.
+
+**Count:** Instead of plotting a heatmap, count how many times Expert X is chosen for Language Y.
+
+**Compare:** Does Korean use a smaller, more specific set of experts than English?
